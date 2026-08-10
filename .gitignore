@@ -1,0 +1,53 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Large Model Weights
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+*.weights
+
+# Compressed Archives / SDK Zips
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.rar
+*.7z
+
+# Output Videos & Media
+output/
+ai_core/output/
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.h264
+*.hevc
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+
+# IDEs & OS Files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

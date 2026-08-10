@@ -1,0 +1,423 @@
+# -*- coding: utf-8 -*-
+"""
+AI CORE - High-Performance Person Line Counter Engine (3-Line & Multi-Camera Driver Support)
+Architecture: Producer-Consumer Threading + Frame Queue Drop + Multi-Line Tracking + Async API Reporting + gRPC Support
+
+Supported Camera Libraries / Drivers:
+  0 / rtsp   : RTSP Stream / Video File / Webcam (PyAV nobuffer + OpenCV fallback)
+  1 / dahua  : Dahua SDK (NetSDK)
+  2 / hik    : Hikvision SDK (HCNetSDK)
+
+Inference Modes:
+  - Local GPU/CPU Inference (Local PyTorch YOLO)
+  - Remote gRPC Inference Service (--use-grpc --grpc-addr host:port)
+"""
+
+import argparse
+import gc
+import os
+import signal
+import sys
+import time
+import cv2
+import numpy as np
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from ai_core.api_client import CameraStatisticPayload, ReportStrategyFactory
+from ai_core.camera_reader import CameraReader
+from ai_core.line_counter import LineConfig, MultiLineCounter, PersonTracker
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="AI CORE - Person 3-Line Counter Engine")
+
+    # Camera Source & Drivers
+    parser.add_argument(
+        "--source",
+        type=str,
+        default="images/test_couting_people.mp4",
+        help="Path to video file, RTSP stream URL, or webcam ID (e.g. 0)",
+    )
+    parser.add_argument(
+        "--camera-type",
+        type=str,
+        default="rtsp",
+        choices=["rtsp", "0", "dahua", "1", "hik", "2"],
+        help="Camera driver type: 'rtsp' (0), 'dahua' (1), or 'hik' (2)",
+    )
+
+    # SDK Credentials (for Dahua & Hikvision)
+    parser.add_argument("--storage-url", type=str, default="", help="Camera IP/Domain for SDK login")
+    parser.add_argument("--storage-port", type=int, default=37777, help="Camera SDK Port (Dahua default 37777, Hik default 8000)")
+    parser.add_argument("--storage-username", type=str, default="admin", help="Camera SDK Username")
+    parser.add_argument("--storage-password", type=str, default="", help="Camera SDK Password")
+    parser.add_argument("--storage-channel", type=int, default=1, help="Camera SDK Channel number (1-based)")
+
+    # Inference Mode: Local vs gRPC
+    parser.add_argument(
+        "--use-grpc",
+        action="store_true",
+        help="Offload YOLO detection to remote gRPC GPU microservice",
+    )
+    parser.add_argument(
+        "--grpc-addr",
+        type=str,
+        default=os.environ.get("COUNT_PEOPLE_ADDR", "localhost:50051"),
+        help="gRPC YoloService server address (e.g. 127.0.0.1:50051)",
+    )
+
+    # Model & Local Inference Settings
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=os.path.join(BASE_DIR, "weights/yolo_best2.pt"),
+        help="Path to YOLO model weights file (for local inference)",
+    )
+    parser.add_argument(
+        "--conf",
+        type=float,
+        default=0.8,
+        help="Confidence threshold for person detection",
+    )
+    parser.add_argument(
+        "--imgsz",
+        type=int,
+        default=640,
+        help="Inference image size (e.g. 640)",
+    )
+
+    # API Reporting Settings
+    parser.add_argument(
+        "--stream-id",
+        type=str,
+        default=os.environ.get("STREAM_ID", "9390d95c3c689c1a1a4cd6ef5ab74cf2"),
+        help="UUID string for Stream ID to send to camera statistics API",
+    )
+    parser.add_argument(
+        "--api-url",
+        type=str,
+        default=os.environ.get("API_URL", "https://api-dev.tado.vn/api/camera-statistics"),
+        help="API endpoint for POSTing camera statistics",
+    )
+    parser.add_argument(
+        "--session",
+        type=str,
+        default=os.environ.get("SESSION_TOKEN", "359c8b594fe339f1d7b8337ad22f4ac1"),
+        help="Session token string for API header authentication",
+    )
+    parser.add_argument(
+        "--batch-mode",
+        action="store_true",
+        help="Use Batch API endpoint (/api/camera-statistics/batch)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=10,
+        help="Number of records to accumulate before flushing batch POST",
+    )
+
+    # Output & Execution Flags
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="output/output_counting.mp4",
+        help="Path to save processed output video file",
+    )
+    parser.add_argument(
+        "--no-loop",
+        action="store_true",
+        help="Disable continuous video looping for video files",
+    )
+    parser.add_argument(
+        "--no-show",
+        action="store_true",
+        help="Disable GUI window (headless mode for Docker / Server)",
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    # 1. Resolve Video Source Path
+    source = args.source
+    if isinstance(source, str) and not source.isdigit() and not source.startswith(("rtsp://", "rtmp://", "http://")):
+        if not os.path.exists(source):
+            project_root = os.path.abspath(os.path.join(BASE_DIR, ".."))
+            alt_source = os.path.join(project_root, source)
+            if os.path.exists(alt_source):
+                source = alt_source
+
+    # 2. Setup Inference Mode (Local YOLO vs gRPC Client)
+    model = None
+    grpc_client = None
+    tracker = None
+
+    if args.use_grpc:
+        print(f"[AI CORE] Using Remote gRPC GPU Inference Service at: {args.grpc_addr}")
+        try:
+            from ai_core.grpc_clients.grpc_clients import GRPCClient
+            grpc_client = GRPCClient(server_addr=args.grpc_addr, target_size=args.imgsz)
+            grpc_client.connect()
+            tracker = PersonTracker(max_disappeared=15)
+        except Exception as e:
+            print(f"[AI CORE Warning] Could not initialize gRPC Client ({e}). Falling back to Local YOLO.")
+            args.use_grpc = False
+
+    if not args.use_grpc:
+        model_path = args.model
+        if not os.path.exists(model_path):
+            alt_model = os.path.join(BASE_DIR, "weights/yolo_best.pt")
+            if os.path.exists(alt_model):
+                model_path = alt_model
+            else:
+                model_path = "yolov8n.pt"  # Fallback to standard YOLOv8n
+
+        print(f"[AI CORE] Initializing Local YOLO Model: {model_path}")
+        from ultralytics import YOLO
+        model = YOLO(model_path)
+
+    # 3. Setup API Reporter
+    api_reporter = ReportStrategyFactory.create_strategy(
+        stream_id=args.stream_id,
+        api_url=args.api_url,
+        session_token=args.session,
+        batch_mode=args.batch_mode,
+        batch_size=args.batch_size,
+    )
+
+    # 4. Configure Counting Line (1 Line for IN/OUT Counting)
+    line_configs = [
+        LineConfig("COUNTING LINE", (0.0, 0.55), (1.0, 0.55), (0, 255, 255)),  # Yellow
+    ]
+    line_counter = MultiLineCounter(lines=line_configs)
+
+    # 5. Initialize Multi-Threaded Camera Reader (RTSP / Dahua / Hikvision)
+    storage_port = args.storage_port
+    if args.camera_type in ["hik", "2"] and storage_port == 37777:
+        storage_port = 8000  # Default Hikvision SDK Port
+
+    camera_reader = CameraReader(
+        source=source,
+        driver_type=args.camera_type,
+        storage_url=args.storage_url,
+        storage_port=storage_port,
+        storage_username=args.storage_username,
+        storage_password=args.storage_password,
+        storage_channel=args.storage_channel,
+        queue_size=16,
+    )
+    camera_reader.start()
+
+    # 6. GUI Window Setup
+    has_display = bool(os.environ.get("DISPLAY"))
+    show_gui = (not args.no_show) and has_display
+    window_name = "AI CORE - Person 3-Line Counter"
+
+    if show_gui:
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(window_name, 1280, 720)
+        print("GUI Active: [+] Zoom In | [-] Zoom Out | [R] Reset | [Q] Quit")
+    else:
+        print("Running AI CORE in Headless Mode (No GUI Window)")
+
+    video_writer = None
+    if args.output:
+        os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+
+    # Signal Handling for Graceful Shutdown
+    shutdown_requested = False
+
+    def _sig_handler(sig, frame):
+        nonlocal shutdown_requested
+        print("\n[AI CORE] Termination signal received. Stopping pipeline...")
+        shutdown_requested = True
+
+    signal.signal(signal.SIGINT, _sig_handler)
+    signal.signal(signal.SIGTERM, _sig_handler)
+
+    # FPS & Performance Metrics
+    fps = 0.0
+    frame_times = []
+    zoom_scale = 1.0
+
+    print(f"\n=======================================================")
+    print(f" AI CORE Person 3-Line Counter Pipeline Running")
+    print(f" Driver Mode    : {camera_reader.driver_type.upper()}")
+    print(f" Inference Mode : {'gRPC Service (' + args.grpc_addr + ')' if args.use_grpc else 'Local PyTorch YOLO'}")
+    print(f" Source         : {source}")
+    print(f" Stream ID      : {args.stream_id}")
+    print(f"=======================================================\n")
+
+    try:
+        while not shutdown_requested:
+            t_start = time.time()
+
+            frame, frame_idx, timestamp = camera_reader.get_frame(timeout=0.5)
+            if frame is None:
+                if not camera_reader.is_connected and not args.no_loop:
+                    time.sleep(0.05)
+                    continue
+                elif args.no_loop:
+                    print("[AI CORE] Stream finished.")
+                    break
+                else:
+                    time.sleep(0.01)
+                    continue
+
+            height, width = frame.shape[:2]
+
+            # Video Writer Initialization
+            if args.output and video_writer is None:
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                video_writer = cv2.VideoWriter(args.output, fourcc, 25.0, (width, height))
+
+            tracks = []
+
+            # Option A: Remote gRPC Service Inference
+            if args.use_grpc and grpc_client is not None:
+                detections = grpc_client.detect_yolo(frame)
+                person_boxes = []
+                for x1, y1, x2, y2, conf, cls_name in detections:
+                    if (cls_name == "person" or str(cls_name) == "0") and conf >= args.conf:
+                        person_boxes.append((x1, y1, x2, y2, conf))
+
+                # Track IDs using IoU PersonTracker
+                tracks = tracker.update(person_boxes)
+
+            # Option B: Local PyTorch YOLO Inference & Tracking
+            else:
+                results = model.track(
+                    frame,
+                    imgsz=args.imgsz,
+                    conf=args.conf,
+                    persist=True,
+                    tracker="bytetrack.yaml",
+                    verbose=False,
+                )
+
+                if results and len(results) > 0 and results[0].boxes is not None:
+                    r_boxes = results[0].boxes
+                    if len(r_boxes) > 0 and r_boxes.id is not None:
+                        boxes = r_boxes.xyxy.cpu().numpy()
+                        clss = r_boxes.cls.cpu().numpy().astype(int)
+                        confs = r_boxes.conf.cpu().numpy()
+                        track_ids = r_boxes.id.cpu().numpy().astype(int)
+
+                        for box, cls, conf, p_id in zip(boxes, clss, confs, track_ids):
+                            if cls == 0 and conf >= args.conf:  # Class 0: Person
+                                tracks.append((box, conf, p_id))
+
+            # Update MultiLineCounter & Detect Crossing Events
+            events = line_counter.update(
+                frame_idx=frame_idx,
+                tracks=tracks,
+                frame_size=(width, height),
+            )
+
+            # Process & Report Line Crossing Events
+            stats = line_counter.get_stats()
+            for ev in events:
+                p_id = ev["person_id"]
+                line_name = ev["line_name"]
+                direction = ev["direction"]
+                print(f"[Frame {frame_idx}] Person ID:{p_id} crossed {line_name} ({direction})!")
+
+                # Report stats payload to API
+                api_reporter.report(
+                    CameraStatisticPayload(
+                        stream_id=args.stream_id,
+                        metric_type="people_counting",
+                        data={
+                            "count": len(tracks),
+                            "person": len(tracks),
+                            "in": stats["total_in"],
+                            "out": stats["total_out"],
+                            "line1_in": stats["lines"].get("LINE 1 (TOP)", {}).get("in", 0),
+                            "line1_out": stats["lines"].get("LINE 1 (TOP)", {}).get("out", 0),
+                            "line2_in": stats["lines"].get("LINE 2 (MID)", {}).get("in", 0),
+                            "line2_out": stats["lines"].get("LINE 2 (MID)", {}).get("out", 0),
+                            "line3_in": stats["lines"].get("LINE 3 (BOT)", {}).get("in", 0),
+                            "line3_out": stats["lines"].get("LINE 3 (BOT)", {}).get("out", 0),
+                        },
+                        time=time.time(),
+                    )
+                )
+
+            # Calculate Rolling Average FPS
+            t_end = time.time()
+            frame_times.append(t_end - t_start)
+            if len(frame_times) > 30:
+                frame_times.pop(0)
+            fps = 1.0 / (sum(frame_times) / len(frame_times)) if frame_times else 0.0
+
+            # Render Lines, Tracked Bounding Boxes & HUD Dashboard Overlay
+            mode_str = f"{camera_reader.driver_type.upper()} | gRPC" if args.use_grpc else camera_reader.driver_type.upper()
+            line_counter.draw_hud(frame, tracks, fps=fps, driver_info=mode_str)
+
+            # Write Video Output
+            if video_writer is not None:
+                video_writer.write(frame)
+
+            # Display GUI Window
+            if show_gui:
+                cv2.putText(
+                    frame,
+                    f"Zoom: {zoom_scale:.1f}x | Mode: {mode_str} | [+] Zoom In [-] Zoom Out [Q] Quit",
+                    (12, height - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+                disp_frame = cv2.resize(frame, (max(100, int(width * zoom_scale)), max(100, int(height * zoom_scale)))) if zoom_scale != 1.0 else frame
+                cv2.imshow(window_name, disp_frame)
+
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
+                elif key in [ord("+"), ord("=")]:
+                    zoom_scale = min(3.0, zoom_scale + 0.2)
+                elif key in [ord("-"), ord("_")]:
+                    zoom_scale = max(0.4, zoom_scale - 0.2)
+                elif key in [ord("r"), ord("R")]:
+                    zoom_scale = 1.0
+
+            # Memory Garbage Collection every 300 frames
+            if frame_idx % 300 == 0:
+                gc.collect()
+
+    except Exception as e:
+        print(f"[AI CORE Error] Pipeline exception: {e}")
+        import traceback
+        traceback.print_exc()
+
+    finally:
+        print("\n[AI CORE] Cleaning up resources...")
+        camera_reader.stop()
+        api_reporter.flush()
+
+        if video_writer is not None:
+            video_writer.release()
+            print(f"[AI CORE] Output video saved to: {args.output}")
+
+        if show_gui:
+            cv2.destroyAllWindows()
+
+        final_stats = line_counter.get_stats()
+        print(f"\n=======================================================")
+        print(f" AI CORE Pipeline Finished!")
+        print(f" Total IN  : {final_stats['total_in']}")
+        print(f" Total OUT : {final_stats['total_out']}")
+        print(f" Total SUM : {final_stats['total_count']}")
+        print(f"=======================================================\n")
+
+
+if __name__ == "__main__":
+    main()
