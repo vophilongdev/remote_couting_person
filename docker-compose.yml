@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  people-counting:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: people_counting:latest
+    container_name: people_counting
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - API_URL=https://api-dev.tado.vn/api/camera-statistics
+      - SESSION_TOKEN=359c8b594fe339f1d7b8337ad22f4ac1
+      - MODEL_PATH=ai_core/weights/yolo_best2.pt
+      - CONF=0.8
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3

@@ -5,17 +5,31 @@ Supports 3 Camera Streaming Drivers/Libraries:
 1. RTSP / Video File / Webcam (PyAV with nobuffer + fallback to OpenCV VideoCapture)
 2. Dahua SDK (NetSDK via DahuaCameraViewer)
 3. Hikvision SDK (HCNetSDK via HIKCameraViewer)
-
-Uses a producer thread + frame queue with automatic oldest-frame drop on overflow
-to achieve ultra-low latency (zero frame accumulation lag).
 """
 
 import logging
 import queue
 import threading
 import time
+
 import cv2
 import numpy as np
+
+try:
+    from ai_core.services.sdk.dha_sdk_realplay import DahuaCameraViewer
+except ImportError:
+    try:
+        from services.sdk.dha_sdk_realplay import DahuaCameraViewer
+    except ImportError:
+        DahuaCameraViewer = None
+
+try:
+    from ai_core.services.sdk.hik_sdk_realplay import HIKCameraViewer
+except ImportError:
+    try:
+        from services.sdk.hik_sdk_realplay import HIKCameraViewer
+    except ImportError:
+        HIKCameraViewer = None
 
 logger = logging.getLogger(__name__)
 
@@ -211,10 +225,9 @@ class CameraReader:
 
     def _read_dahua_sdk(self):
         logger.info(f"Connecting to Dahua Camera via SDK: {self.storage_url}:{self.storage_port}")
-        try:
-            from ai_core.services.sdk.dha_sdk_realplay import DahuaCameraViewer
-        except ImportError:
-            from services.sdk.dha_sdk_realplay import DahuaCameraViewer
+        if DahuaCameraViewer is None:
+            logger.error("Dahua SDK viewer module could not be imported.")
+            return
 
         viewer = DahuaCameraViewer()
         if not viewer.connect(self.storage_url, self.storage_port, self.storage_username, self.storage_password):
@@ -252,10 +265,9 @@ class CameraReader:
 
     def _read_hik_sdk(self):
         logger.info(f"Connecting to Hikvision Camera via SDK: {self.storage_url}:{self.storage_port}")
-        try:
-            from ai_core.services.sdk.hik_sdk_realplay import HIKCameraViewer
-        except ImportError:
-            from services.sdk.hik_sdk_realplay import HIKCameraViewer
+        if HIKCameraViewer is None:
+            logger.error("Hikvision SDK viewer module could not be imported.")
+            return
 
         viewer = HIKCameraViewer()
         if not viewer.connect(self.storage_url, self.storage_port, self.storage_username, self.storage_password):

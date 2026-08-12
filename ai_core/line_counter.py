@@ -7,6 +7,7 @@ crossing detection, state tracking, and HUD dashboard overlay rendering.
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Set, Tuple
+
 import cv2
 import numpy as np
 

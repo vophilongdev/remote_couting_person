@@ -30,6 +30,8 @@ class CameraStatisticData:
         return res
 
 
+from datetime import datetime
+
 @dataclass
 class CameraStatisticPayload:
     stream_id: str
@@ -38,11 +40,16 @@ class CameraStatisticPayload:
     time: float = field(default_factory=time.time)
 
     def to_dict(self) -> Dict[str, Any]:
+        dt = datetime.fromtimestamp(self.time)
         return {
             "stream_id": self.stream_id,
             "metric_type": self.metric_type,
             "data": self.data,
-            "time": self.time,
+            "year": dt.year,
+            "month": dt.month,
+            "day": dt.day,
+            "hour": dt.hour,
+            "minute": dt.minute,
         }
 
 
@@ -51,13 +58,30 @@ class CameraStatisticsAPIClient:
 
     def __init__(self, base_url: str = "https://api-dev.tado.vn/api/camera-statistics", session_token: str = ""):
         self.base_url = base_url.rstrip("/")
-        self.session_token = session_token or os.environ.get("SESSION_TOKEN", "")
+        self.session_token = session_token or os.environ.get("SESSION_TOKEN", "359c8b594fe339f1d7b8337ad22f4ac1")
 
     def _get_headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self.session_token:
             headers["session"] = self.session_token
         return headers
+
+    def get_cameras(self) -> List[Dict[str, Any]]:
+        """Fetch list of active cameras registered in Backend API."""
+        url = "https://api-dev.tado.vn/api/cameras"
+        try:
+            response = requests.get(url, headers=self._get_headers(), timeout=10)
+            if response.status_code == 200:
+                res = response.json()
+                if isinstance(res, dict) and "data" in res:
+                    return res["data"]
+                elif isinstance(res, list):
+                    return res
+            logger.warning(f"[GET Cameras Error {response.status_code}] {response.text}")
+            return []
+        except Exception as e:
+            logger.error(f"[GET Cameras Exception] {e}")
+            return []
 
     def create_statistic(self, payload: CameraStatisticPayload) -> Optional[Dict[str, Any]]:
         url = self.base_url
@@ -89,6 +113,42 @@ class CameraStatisticsAPIClient:
                 return None
         except Exception as e:
             logger.error(f"[POST Batch Exception] {e}")
+            return None
+
+    def get_people_counting_summary(
+        self, stream_id: str, group_by: str = "hour", start_time: Optional[str] = None, end_time: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/people-counting"
+        params = {"stream_id": stream_id, "group_by": group_by}
+        if start_time:
+            params["start_time"] = start_time
+        if end_time:
+            params["end_time"] = end_time
+        try:
+            response = requests.get(url, params=params, headers=self._get_headers(), timeout=5)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.warning(f"[GET People Counting Error {response.status_code}] {response.text}")
+                return None
+        except Exception as e:
+            logger.error(f"[GET People Counting Exception] {e}")
+            return None
+
+    def get_summary(
+        self, stream_id: str, group_by: str = "hour"
+    ) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/summary"
+        params = {"stream_id": stream_id, "group_by": group_by}
+        try:
+            response = requests.get(url, params=params, headers=self._get_headers(), timeout=5)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.warning(f"[GET Summary Error {response.status_code}] {response.text}")
+                return None
+        except Exception as e:
+            logger.error(f"[GET Summary Exception] {e}")
             return None
 
 

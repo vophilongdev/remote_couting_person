@@ -1,0 +1,35 @@
+# Ignore virtual environments
+venv/
+env/
+.venv/
+
+# Ignore outputs and media files
+output/
+ai_core/output/
+images/
+*.mp4
+*.avi
+*.mkv
+
+# Ignore large SDK archives, demos, docs and source samples
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+SDK_HiK/**/QtDemo/
+SDK_HiK/**/consoleDemo/
+SDK_HiK/**/LinuxJavaDemo/
+SDK_HiK/**/doc/
+SDK_DAHUA/**/doc/
+SDK_DAHUA/**/src/
+
+# Ignore git and local cache
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+.idea/
+.vscode/

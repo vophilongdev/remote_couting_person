@@ -267,7 +267,10 @@ class DahuaSDK:
             self._owns_sdk_reference = False
             _dahua_instance_count = max(0, _dahua_instance_count - 1)
             if _dahua_instance_count == 0 and _dahua_initialized:
-                self.lib.CLIENT_Cleanup()
+                try:
+                    self.lib.CLIENT_Cleanup()
+                except Exception as e:
+                    logger.warning(f"Dahua SDK CLIENT_Cleanup exception: {e}")
                 _dahua_initialized = False
                 logger.info("Dahua SDK cleaned up.")
 

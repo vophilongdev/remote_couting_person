@@ -2,15 +2,6 @@
 """
 AI CORE - High-Performance Person Line Counter Engine (3-Line & Multi-Camera Driver Support)
 Architecture: Producer-Consumer Threading + Frame Queue Drop + Multi-Line Tracking + Async API Reporting + gRPC Support
-
-Supported Camera Libraries / Drivers:
-  0 / rtsp   : RTSP Stream / Video File / Webcam (PyAV nobuffer + OpenCV fallback)
-  1 / dahua  : Dahua SDK (NetSDK)
-  2 / hik    : Hikvision SDK (HCNetSDK)
-
-Inference Modes:
-  - Local GPU/CPU Inference (Local PyTorch YOLO)
-  - Remote gRPC Inference Service (--use-grpc --grpc-addr host:port)
 """
 
 import argparse
@@ -19,8 +10,11 @@ import os
 import signal
 import sys
 import time
+import traceback
+
 import cv2
 import numpy as np
+from ultralytics import YOLO
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -93,7 +87,7 @@ def parse_args():
     parser.add_argument(
         "--stream-id",
         type=str,
-        default=os.environ.get("STREAM_ID", "9390d95c3c689c1a1a4cd6ef5ab74cf2"),
+        default=os.environ.get("STREAM_ID", ""),
         help="UUID string for Stream ID to send to camera statistics API",
     )
     parser.add_argument(
@@ -105,7 +99,7 @@ def parse_args():
     parser.add_argument(
         "--session",
         type=str,
-        default=os.environ.get("SESSION_TOKEN", "359c8b594fe339f1d7b8337ad22f4ac1"),
+        default=os.environ.get("SESSION_TOKEN", ""),
         help="Session token string for API header authentication",
     )
     parser.add_argument(
@@ -179,7 +173,6 @@ def main():
                 model_path = "yolov8n.pt"  # Fallback to standard YOLOv8n
 
         print(f"[AI CORE] Initializing Local YOLO Model: {model_path}")
-        from ultralytics import YOLO
         model = YOLO(model_path)
 
     # 3. Setup API Reporter
@@ -338,12 +331,6 @@ def main():
                             "person": len(tracks),
                             "in": stats["total_in"],
                             "out": stats["total_out"],
-                            "line1_in": stats["lines"].get("LINE 1 (TOP)", {}).get("in", 0),
-                            "line1_out": stats["lines"].get("LINE 1 (TOP)", {}).get("out", 0),
-                            "line2_in": stats["lines"].get("LINE 2 (MID)", {}).get("in", 0),
-                            "line2_out": stats["lines"].get("LINE 2 (MID)", {}).get("out", 0),
-                            "line3_in": stats["lines"].get("LINE 3 (BOT)", {}).get("in", 0),
-                            "line3_out": stats["lines"].get("LINE 3 (BOT)", {}).get("out", 0),
                         },
                         time=time.time(),
                     )
@@ -395,7 +382,6 @@ def main():
 
     except Exception as e:
         print(f"[AI CORE Error] Pipeline exception: {e}")
-        import traceback
         traceback.print_exc()
 
     finally:
