@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from ultralytics import YOLO
 
-from ai_core.api_client import BaseReportStrategy, CameraStatisticPayload, CameraStatisticsAPIClient, ReportStrategyFactory
+from ai_core.api_client import get_backend_cameras, post_camera_statistic
 from ai_core.camera_reader import CameraReader
 from ai_core.line_counter import MultiLineCounter, PersonTracker
 
@@ -44,11 +44,10 @@ app.add_middleware(
 
 async def auto_sync_backend_cameras_loop():
     """Background worker that continuously syncs cameras from Backend API (GET /api/cameras)."""
-    client = CameraStatisticsAPIClient()
     logger.info("[Auto-Sync AI Worker] Polling Backend API (GET /api/cameras) for 'people_counting' cameras...")
     while True:
         try:
-            cameras = client.get_cameras()
+            cameras = get_backend_cameras()
             for cam in cameras:
                 cam_id = str(cam.get("id") or cam.get("stream_id", ""))
                 services = cam.get("service_type", [])
@@ -98,7 +97,6 @@ class StreamState:
         self.stream_id: str = stream_id
         self.camera_reader: Optional[CameraReader] = None
         self.line_counter: Optional[MultiLineCounter] = None
-        self.api_reporter: Optional[BaseReportStrategy] = None
         self.yolo_model = None
         self.is_running = False
         self.current_frame: Optional[np.ndarray] = None
@@ -148,13 +146,6 @@ def pipeline_loop(stream: StreamState):
                 stream.use_grpc = False
 
     model = None if stream.use_grpc else get_shared_yolo_model(stream.model_path)
-    
-    stream.api_reporter = ReportStrategyFactory.create_strategy(
-        stream_id=stream.stream_id,
-        api_url=stream.api_url,
-        session_token=stream.session_token,
-        batch_mode=False
-    )
     
     line_configs = [
         {"name": "COUNTING LINE", "p1": (0, 400), "p2": (1920, 400), "dir_in": "down"},
@@ -217,19 +208,18 @@ def pipeline_loop(stream: StreamState):
             stream.last_stats = stats
 
             # Report stats payload if line crossed
-            if events:
-                payload = CameraStatisticPayload(
+            for ev in events:
+                inc_in = 1 if ev.get("direction") == "IN" else 0
+                inc_out = 1 if ev.get("direction") == "OUT" else 0
+                event_count = inc_in + inc_out
+                post_camera_statistic(
                     stream_id=stream.stream_id,
-                    metric_type="people_counting",
-                    data={
-                        "count": len(tracks),
-                        "person": len(tracks),
-                        "in": stats["total_in"],
-                        "out": stats["total_out"],
-                    },
-                    time=time.time(),
+                    total_in=inc_in,
+                    total_out=inc_out,
+                    current_count=event_count,
+                    api_url=stream.api_url,
+                    session_token=stream.session_token,
                 )
-                stream.api_reporter.report(payload)
 
             # Calculate FPS
             t_end = time.time()

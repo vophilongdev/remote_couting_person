@@ -18,7 +18,7 @@ from ultralytics import YOLO
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from ai_core.api_client import CameraStatisticPayload, ReportStrategyFactory
+from ai_core.api_client import flush_pending_requests, post_camera_statistic
 from ai_core.camera_reader import CameraReader
 from ai_core.line_counter import LineConfig, MultiLineCounter, PersonTracker
 
@@ -175,15 +175,6 @@ def main():
         print(f"[AI CORE] Initializing Local YOLO Model: {model_path}")
         model = YOLO(model_path)
 
-    # 3. Setup API Reporter
-    api_reporter = ReportStrategyFactory.create_strategy(
-        stream_id=args.stream_id,
-        api_url=args.api_url,
-        session_token=args.session,
-        batch_mode=args.batch_mode,
-        batch_size=args.batch_size,
-    )
-
     # 4. Configure Counting Line (1 Line for IN/OUT Counting)
     line_configs = [
         LineConfig("COUNTING LINE", (0.0, 0.55), (1.0, 0.55), (0, 255, 255)),  # Yellow
@@ -321,19 +312,18 @@ def main():
                 direction = ev["direction"]
                 print(f"[Frame {frame_idx}] Person ID:{p_id} crossed {line_name} ({direction})!")
 
-                # Report stats payload to API
-                api_reporter.report(
-                    CameraStatisticPayload(
-                        stream_id=args.stream_id,
-                        metric_type="people_counting",
-                        data={
-                            "count": len(tracks),
-                            "person": len(tracks),
-                            "in": stats["total_in"],
-                            "out": stats["total_out"],
-                        },
-                        time=time.time(),
-                    )
+                inc_in = 1 if direction == "IN" else 0
+                inc_out = 1 if direction == "OUT" else 0
+                event_count = inc_in + inc_out
+
+                # Post camera stats directly to Backend API (count & person = in + out)
+                post_camera_statistic(
+                    stream_id=args.stream_id,
+                    total_in=inc_in,
+                    total_out=inc_out,
+                    current_count=event_count,
+                    api_url=args.api_url,
+                    session_token=args.session,
                 )
 
             # Calculate Rolling Average FPS
@@ -387,7 +377,7 @@ def main():
     finally:
         print("\n[AI CORE] Cleaning up resources...")
         camera_reader.stop()
-        api_reporter.flush()
+        flush_pending_requests()
 
         if video_writer is not None:
             video_writer.release()
