@@ -69,6 +69,8 @@ def post_camera_statistic(
             "person": current_count,
             "in": total_in,
             "out": total_out,
+            "enter": total_in,
+            "exit": total_out,
         },
         "year": dt.year,
         "month": dt.month,

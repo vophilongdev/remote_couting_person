@@ -17,7 +17,7 @@ from ultralytics import YOLO
 
 from ai_core.api_client import get_backend_cameras, post_camera_statistic
 from ai_core.camera_reader import CameraReader
-from ai_core.line_counter import MultiLineCounter, PersonTracker
+from ai_core.line_counter import LineConfig, MultiLineCounter, PersonTracker
 
 try:
     from ai_core.grpc_clients.grpc_clients import GRPCClient
@@ -50,7 +50,7 @@ async def auto_sync_backend_cameras_loop():
             cameras = get_backend_cameras()
             for cam in cameras:
                 cam_id = str(cam.get("id") or cam.get("stream_id", ""))
-                services = cam.get("service_type", [])
+                services = cam.get("service_type") or []
                 if isinstance(services, str):
                     services = [services]
                 
@@ -148,7 +148,7 @@ def pipeline_loop(stream: StreamState):
     model = None if stream.use_grpc else get_shared_yolo_model(stream.model_path)
     
     line_configs = [
-        {"name": "COUNTING LINE", "p1": (0, 400), "p2": (1920, 400), "dir_in": "down"},
+        LineConfig("COUNTING LINE", (0.0, 0.55), (1.0, 0.55), (0, 255, 255)),
     ]
     stream.line_counter = MultiLineCounter(lines=line_configs)
     
@@ -203,8 +203,15 @@ def pipeline_loop(stream: StreamState):
                             if cls == 0 and conf >= stream.conf_threshold:
                                 tracks.append((box, conf, p_id))
 
+            # Get frame size
+            h, w = frame.shape[:2]
             # Update MultiLineCounter Tracker
-            events, stats = stream.line_counter.update(tracks)
+            events = stream.line_counter.update(
+                frame_idx=frame_idx,
+                tracks=tracks,
+                frame_size=(w, h)
+            )
+            stats = stream.line_counter.get_stats()
             stream.last_stats = stats
 
             # Report stats payload if line crossed
@@ -238,8 +245,6 @@ def pipeline_loop(stream: StreamState):
     finally:
         if stream.camera_reader:
             stream.camera_reader.stop()
-        if stream.api_reporter:
-            stream.api_reporter.flush()
         stream.is_running = False
         logger.info(f"Stream {stream.stream_id} pipeline loop finished.")
 

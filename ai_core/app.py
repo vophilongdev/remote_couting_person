@@ -73,7 +73,7 @@ def parse_args():
     parser.add_argument(
         "--conf",
         type=float,
-        default=0.8,
+        default=0.55,
         help="Confidence threshold for person detection",
     )
     parser.add_argument(
