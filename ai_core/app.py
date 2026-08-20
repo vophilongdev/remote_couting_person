@@ -18,7 +18,7 @@ from ultralytics import YOLO
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from ai_core.api_client import flush_pending_requests, post_camera_statistic
+from ai_core.api_client import flush_pending_requests, get_backend_rules, parse_lines_from_rules, post_camera_statistic
 from ai_core.camera_reader import CameraReader
 from ai_core.line_counter import LineConfig, MultiLineCounter, PersonTracker
 
@@ -114,13 +114,7 @@ def parse_args():
         help="Number of records to accumulate before flushing batch POST",
     )
 
-    # Output & Execution Flags
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="output/output_counting.mp4",
-        help="Path to save processed output video file",
-    )
+    # Execution Flags
     parser.add_argument(
         "--no-loop",
         action="store_true",
@@ -174,10 +168,21 @@ def main():
         print(f"[AI CORE] Initializing Local YOLO Model: {model_path}")
         model = YOLO(model_path)
 
-    # 4. Configure Counting Line (1 Line for IN/OUT Counting)
-    line_configs = [
-        LineConfig("COUNTING LINE", (0.0, 0.55), (1.0, 0.55), (0, 255, 255)),  # Yellow
-    ]
+    # 4. Configure Counting Lines (Fetch dynamically from Backend API or fallback to default)
+    stream_id = getattr(args, "stream_id", None) or os.environ.get("STREAM_ID", "")
+    raw_rules = get_backend_rules(stream_id=stream_id if stream_id else None, rule_type="people_counting")
+    parsed_lines = parse_lines_from_rules(raw_rules)
+    if parsed_lines:
+        line_configs = [
+            LineConfig(name=ld["name"], p1_ratio=ld["p1_ratio"], p2_ratio=ld["p2_ratio"], color=ld["color"], filter_type=ld.get("type", "line"))
+            for ld in parsed_lines
+        ]
+        print(f"[AI CORE] Loaded {len(line_configs)} line config(s) from Backend API: {[l.name for l in line_configs]}")
+    else:
+        print("[AI CORE] No custom line rules found in API. Using default horizontal line.")
+        line_configs = [
+            LineConfig("COUNTING LINE", (0.0, 0.55), (1.0, 0.55), (0, 255, 255)),  # Yellow
+        ]
     line_counter = MultiLineCounter(lines=line_configs)
 
     # 5. Initialize Multi-Threaded Camera Reader (RTSP / Dahua / Hikvision)
@@ -209,10 +214,6 @@ def main():
     else:
         print("Running AI CORE in Headless Mode (No GUI Window)")
 
-    video_writer = None
-    if args.output:
-        os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-
     # Signal Handling for Graceful Shutdown
     shutdown_requested = False
 
@@ -243,6 +244,47 @@ def main():
 
             frame, frame_idx, timestamp = camera_reader.get_frame(timeout=0.5)
             if frame is None:
+                if show_gui:
+                    blank = np.zeros((720, 1280, 3), dtype=np.uint8)
+                    if camera_reader.driver_type in ["dahua", "hik"]:
+                        cam_info = f"{args.storage_url}:{storage_port}"
+                    else:
+                        cam_info = source
+                    cv2.putText(
+                        blank,
+                        f"CAMERA OFFLINE / CONNECTING FAILED",
+                        (50, 330),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        (0, 0, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        blank,
+                        f"Host: {cam_info} (Driver: {camera_reader.driver_type.upper()})",
+                        (50, 380),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (200, 200, 200),
+                        1,
+                        cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        blank,
+                        "Press [Q] or [ESC] to Quit",
+                        (50, 440),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (255, 255, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+                    cv2.imshow(window_name, blank)
+                    key = cv2.waitKey(50) & 0xFF
+                    if key in [ord("q"), ord("Q"), 27]:
+                        break
+
                 if not camera_reader.is_connected and not args.no_loop:
                     time.sleep(0.05)
                     continue
@@ -254,12 +296,6 @@ def main():
                     continue
 
             height, width = frame.shape[:2]
-
-            # Video Writer Initialization
-            if args.output and video_writer is None:
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                video_writer = cv2.VideoWriter(args.output, fourcc, 25.0, (width, height))
-
             tracks = []
 
             # Option A: Remote gRPC Service Inference
@@ -348,10 +384,6 @@ def main():
             mode_str = f"{camera_reader.driver_type.upper()} | gRPC" if args.use_grpc else camera_reader.driver_type.upper()
             line_counter.draw_hud(frame, tracks, fps=fps, driver_info=mode_str)
 
-            # Write Video Output
-            if video_writer is not None:
-                video_writer.write(frame)
-
             # Display GUI Window
             if show_gui:
                 cv2.putText(
@@ -389,10 +421,6 @@ def main():
         print("\n[AI CORE] Cleaning up resources...")
         camera_reader.stop()
         flush_pending_requests()
-
-        if video_writer is not None:
-            video_writer.release()
-            print(f"[AI CORE] Output video saved to: {args.output}")
 
         if show_gui:
             cv2.destroyAllWindows()

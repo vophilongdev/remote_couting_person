@@ -13,6 +13,9 @@ from NetSDK.SDK_Enum import SDK_RealPlayType, EM_LOGIN_SPAC_CAP_TYPE, EM_REALDAT
 from NetSDK.SDK_Struct import (C_LLONG, NET_IN_LOGIN_WITH_HIGHLEVEL_SECURITY,
                               NET_OUT_LOGIN_WITH_HIGHLEVEL_SECURITY, LOG_SET_PRINT_INFO)
 
+_GLOBAL_CALLBACK_KEEPALIVE = []
+
+
 class DahuaCameraViewer:
     def __init__(self):
         self.loginID = C_LLONG()
@@ -21,6 +24,14 @@ class DahuaCameraViewer:
         self.m_DisConnectCallBack = fDisConnect(self.on_disconnect)
         self.m_ReConnectCallBack = fHaveReConnect(self.on_reconnect)
         self.m_RealDataCallBack = fRealDataCallBackEx2(self.on_frame_data)
+        
+        # Keep ctypes C callbacks alive in global list to prevent Python GC from freeing function pointers
+        _GLOBAL_CALLBACK_KEEPALIVE.extend([
+            self.m_DisConnectCallBack,
+            self.m_ReConnectCallBack,
+            self.m_RealDataCallBack,
+        ])
+        
         self.raw_buffer = bytearray()
         self.frame_queue = []
         self.frame_lock = threading.Lock()
@@ -84,13 +95,13 @@ class DahuaCameraViewer:
             self.frame_height = None
             self.resolution_event.clear()
             cmd = [
-                'ffmpeg', '-hwaccel', 'none', '-fflags', 'nobuffer', '-flags', 'low_delay',
-                '-probesize', '1000000', '-analyzeduration', '1000000', '-f', codec_hint,
+                'ffmpeg', '-hwaccel', 'none', '-fflags', 'nobuffer+discardcorrupt', '-flags', 'low_delay',
+                '-probesize', '1000000', '-analyzeduration', '1000000',
                 '-i', 'pipe:0', '-f', 'rawvideo', '-pix_fmt', 'bgr24',
                 '-an', '-loglevel', 'info', 'pipe:1'
             ]
             self.current_codec = codec_hint
-            print(f"Setting up decoder for codec: {codec_hint}")
+            print(f"Setting up FFmpeg decoder for Dahua SDK stream...")
             self.ffmpeg_process = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
@@ -168,6 +179,10 @@ class DahuaCameraViewer:
 
     def stop_stream(self):
         if self.playID:
+            try:
+                self.sdk.SetRealDataCallBackEx2(self.playID, None, None, 0)
+            except Exception:
+                pass
             self.sdk.StopRealPlayEx(self.playID)
             self.playID = 0
         self.is_playing = False
@@ -194,7 +209,10 @@ class DahuaCameraViewer:
 
     def cleanup(self):
         self.disconnect()
-        self.sdk.Cleanup()
+        try:
+            self.sdk.Cleanup()
+        except Exception:
+            pass
         print("Cleanup completed")
 
     def on_disconnect(self, lLoginID, pchDVRIP, nDVRPort, dwUser):

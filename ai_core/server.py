@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from ultralytics import YOLO
 
-from ai_core.api_client import get_backend_cameras, post_camera_statistic
+from ai_core.api_client import get_backend_cameras, get_backend_rules, parse_lines_from_rules, post_camera_statistic
 from ai_core.camera_reader import CameraReader
 from ai_core.line_counter import LineConfig, MultiLineCounter, PersonTracker
 
@@ -149,9 +149,20 @@ def pipeline_loop(stream: StreamState):
 
     model = None if stream.use_grpc else get_shared_yolo_model(stream.model_path)
     
-    line_configs = [
-        LineConfig("COUNTING LINE", (0.0, 0.55), (1.0, 0.55), (0, 255, 255)),
-    ]
+    # Fetch counting lines dynamically from Backend API rules (GET /api/rules) matching stream_id and people_counting
+    raw_rules = get_backend_rules(stream_id=stream.stream_id, rule_type="people_counting", session_token=stream.session_token)
+    parsed_lines = parse_lines_from_rules(raw_rules)
+    if parsed_lines:
+        line_configs = [
+            LineConfig(name=ld["name"], p1_ratio=ld["p1_ratio"], p2_ratio=ld["p2_ratio"], color=ld["color"], filter_type=ld.get("type", "line"))
+            for ld in parsed_lines
+        ]
+        logger.info(f"[Server Pipeline] Loaded {len(line_configs)} dynamic line config(s) from API for stream {stream.stream_id}: {[l.name for l in line_configs]}")
+    else:
+        logger.info(f"[Server Pipeline] No rule lines found in API for stream {stream.stream_id}. Using default horizontal line.")
+        line_configs = [
+            LineConfig("COUNTING LINE", (0.0, 0.55), (1.0, 0.55), (0, 255, 255)),
+        ]
     stream.line_counter = MultiLineCounter(lines=line_configs)
     
     stream.camera_reader = CameraReader(

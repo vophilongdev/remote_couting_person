@@ -5,11 +5,14 @@ Supports 3 Counting Lines (Line 1, Line 2, Line 3) with custom line coordinates,
 crossing detection, state tracking, and HUD dashboard overlay rendering.
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Set, Tuple
 
 import cv2
 import numpy as np
+
+logger = logging.getLogger("LineCounter")
 
 
 @dataclass
@@ -18,11 +21,12 @@ class LineConfig:
     p1_ratio: Tuple[float, float]  # (x1_ratio, y1_ratio) e.g. (0.0, 0.35)
     p2_ratio: Tuple[float, float]  # (x2_ratio, y2_ratio) e.g. (1.0, 0.35)
     color: Tuple[int, int, int]    # BGR color tuple e.g. (255, 255, 0)
+    filter_type: str = "line"      # "line_in" | "line_out" | "line"
 
 
 class MultiLineCounter:
     """
-    Manages 3 Counting Lines and tracks line crossing events.
+    Manages Counting Lines and tracks line crossing events based on UI rules.
     """
 
     def __init__(self, lines: List[LineConfig] = None):
@@ -60,7 +64,7 @@ class MultiLineCounter:
         frame_size: Tuple[int, int],                  # (width, height)
     ) -> List[Dict]:
         """
-        Process current frame tracks and detect line crossings across all 3 lines.
+        Process current frame tracks and detect line crossings across all lines.
         Returns list of new crossing event dicts.
         """
         width, height = frame_size
@@ -73,7 +77,7 @@ class MultiLineCounter:
             y1 = int(line.p1_ratio[1] * height)
             x2 = int(line.p2_ratio[0] * width)
             y2 = int(line.p2_ratio[1] * height)
-            abs_lines.append((line.name, (x1, y1), (x2, y2), line.color))
+            abs_lines.append((line, (x1, y1), (x2, y2), line.color))
 
         for box, conf, p_id in tracks:
             cx = int((box[0] + box[2]) / 2)
@@ -88,12 +92,23 @@ class MultiLineCounter:
             self.track_history[p_id] = curr_center
 
             # Check crossing for each line
-            for name, p1, p2, color in abs_lines:
-                line_y = p1[1]  # Horizontal line y-level
+            for line_cfg, p1, p2, color in abs_lines:
+                name = line_cfg.name
+                ftype = getattr(line_cfg, "filter_type", "line").lower()
 
-                # Downward crossing (IN)
-                if py < line_y and cy >= line_y:
-                    if p_id not in self.crossed_in[name]:
+                crossed, raw_direction = self._check_line_crossing(p1, p2, (px, py), curr_center)
+                if crossed:
+                    # Respect UI filter_type rules:
+                    # line_in filter specifically counts IN traffic
+                    # line_out filter specifically counts OUT traffic
+                    if ftype == "line_in":
+                        event_dir = "IN"
+                    elif ftype == "line_out":
+                        event_dir = "OUT"
+                    else:
+                        event_dir = raw_direction
+
+                    if event_dir == "IN" and p_id not in self.crossed_in[name]:
                         self.crossed_in[name].add(p_id)
                         self.global_crossed_in.add(p_id)
                         event = {
@@ -104,10 +119,10 @@ class MultiLineCounter:
                             "center": curr_center,
                         }
                         new_events.append(event)
-
-                # Upward crossing (OUT)
-                elif py > line_y and cy <= line_y:
-                    if p_id not in self.crossed_out[name]:
+                        logger.info(
+                            f"[Line Crossing] Object ID:{p_id} crossed line '{name}' (IN) at frame pixel line P1={p1}, P2={p2}, center={curr_center}"
+                        )
+                    elif event_dir == "OUT" and p_id not in self.crossed_out[name]:
                         self.crossed_out[name].add(p_id)
                         self.global_crossed_out.add(p_id)
                         event = {
@@ -118,8 +133,46 @@ class MultiLineCounter:
                             "center": curr_center,
                         }
                         new_events.append(event)
+                        logger.info(
+                            f"[Line Crossing] Object ID:{p_id} crossed line '{name}' (OUT) at frame pixel line P1={p1}, P2={p2}, center={curr_center}"
+                        )
 
         return new_events
+
+    @staticmethod
+    def _ccw(A: Tuple[int, int], B: Tuple[int, int], C: Tuple[int, int]) -> float:
+        """2D Orientation test (cross product of vectors AB and AC)."""
+        return float((B[0] - A[0]) * (C[1] - A[1]) - (B[1] - A[1]) * (C[0] - A[0]))
+
+    @classmethod
+    def _check_line_crossing(
+        cls,
+        p1: Tuple[int, int],
+        p2: Tuple[int, int],
+        prev_pt: Tuple[int, int],
+        curr_pt: Tuple[int, int],
+    ) -> Tuple[bool, str]:
+        """
+        Check 2D segment intersection between line (p1, p2) and motion trajectory (prev_pt, curr_pt).
+        Returns (crossed: bool, direction: "IN" | "OUT" | "").
+        """
+        ccw_prev = cls._ccw(p1, p2, prev_pt)
+        ccw_curr = cls._ccw(p1, p2, curr_pt)
+        ccw_p1 = cls._ccw(prev_pt, curr_pt, p1)
+        ccw_p2 = cls._ccw(prev_pt, curr_pt, p2)
+
+        # Check if line segment (p1, p2) and trajectory segment (prev_pt, curr_pt) intersect
+        if (ccw_prev * ccw_curr <= 0) and (ccw_p1 * ccw_p2 <= 0) and (ccw_prev != ccw_curr):
+            if ccw_prev < 0 and ccw_curr >= 0:
+                return True, "IN"
+            elif ccw_prev > 0 and ccw_curr <= 0:
+                return True, "OUT"
+            elif ccw_prev <= 0 and ccw_curr > 0:
+                return True, "IN"
+            elif ccw_prev >= 0 and ccw_curr < 0:
+                return True, "OUT"
+
+        return False, ""
 
     def get_stats(self) -> Dict:
         """Get summary dictionary of counts."""
@@ -150,7 +203,7 @@ class MultiLineCounter:
         """
         height, width = frame.shape[:2]
 
-        # 1. Draw 3 Counting Lines
+        # 1. Draw Counting Lines
         for line in self.lines_config:
             x1 = int(line.p1_ratio[0] * width)
             y1 = int(line.p1_ratio[1] * height)
@@ -162,14 +215,16 @@ class MultiLineCounter:
             cv2.circle(frame, (x1, y1), 6, line.color, -1)
             cv2.circle(frame, (x2, y2), 6, line.color, -1)
 
-            # Label text for each line
+            # Label text for each line at segment midpoint
             line_in_cnt = len(self.crossed_in[line.name])
             line_out_cnt = len(self.crossed_out[line.name])
             label = f"{line.name} | IN:{line_in_cnt} OUT:{line_out_cnt}"
+            mid_x = (x1 + x2) // 2
+            mid_y = (y1 + y2) // 2
             cv2.putText(
                 frame,
                 label,
-                (x1 + 15, y1 - 8),
+                (mid_x + 10, mid_y - 8),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
                 line.color,
