@@ -67,13 +67,13 @@ def parse_args():
     parser.add_argument(
         "--model",
         type=str,
-        default=os.path.join(BASE_DIR, "weights/yolo_best2.pt"),
+        default=os.path.join(BASE_DIR, "weights/yolo_best3.pt"),
         help="Path to YOLO model weights file (for local inference)",
     )
     parser.add_argument(
         "--conf",
         type=float,
-        default=0.55,
+        default=0.5,
         help="Confidence threshold for person detection",
     )
     parser.add_argument(
@@ -150,7 +150,7 @@ def main():
     # 2. Setup Inference Mode (Local YOLO vs gRPC Client)
     model = None
     grpc_client = None
-    tracker = None
+    tracker = PersonTracker(max_disappeared=15)
 
     if args.use_grpc:
         print(f"[AI CORE] Using Remote gRPC GPU Inference Service at: {args.grpc_addr}")
@@ -158,7 +158,6 @@ def main():
             from ai_core.grpc_clients.grpc_clients import GRPCClient
             grpc_client = GRPCClient(server_addr=args.grpc_addr, target_size=args.imgsz)
             grpc_client.connect()
-            tracker = PersonTracker(max_disappeared=15)
         except Exception as e:
             print(f"[AI CORE Warning] Could not initialize gRPC Client ({e}). Falling back to Local YOLO.")
             args.use_grpc = False
@@ -285,17 +284,29 @@ def main():
                     verbose=False,
                 )
 
+                person_boxes = []
                 if results and len(results) > 0 and results[0].boxes is not None:
                     r_boxes = results[0].boxes
-                    if len(r_boxes) > 0 and r_boxes.id is not None:
+                    if len(r_boxes) > 0:
                         boxes = r_boxes.xyxy.cpu().numpy()
                         clss = r_boxes.cls.cpu().numpy().astype(int)
                         confs = r_boxes.conf.cpu().numpy()
-                        track_ids = r_boxes.id.cpu().numpy().astype(int)
+                        
+                        has_ids = r_boxes.id is not None
+                        track_ids = r_boxes.id.cpu().numpy().astype(int) if has_ids else None
 
-                        for box, cls, conf, p_id in zip(boxes, clss, confs, track_ids):
-                            if cls == 0 and conf >= args.conf:  # Class 0: Person
-                                tracks.append((box, conf, p_id))
+                        for i, (box, cls, conf) in enumerate(zip(boxes, clss, confs)):
+                            if (cls == 0 or str(cls) == "0") and conf >= args.conf:  # Class 0: Person
+                                if has_ids and track_ids is not None:
+                                    tracks.append((box, conf, int(track_ids[i])))
+                                else:
+                                    person_boxes.append((box[0], box[1], box[2], box[3], conf))
+
+                if person_boxes:
+                    fallback_tracks = tracker.update(person_boxes)
+                    tracks.extend(fallback_tracks)
+                elif not tracks:
+                    tracker.update([])
 
             # Update MultiLineCounter & Detect Crossing Events
             events = line_counter.update(

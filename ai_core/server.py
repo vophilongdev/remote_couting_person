@@ -33,6 +33,7 @@ app = FastAPI(
     version="2.0.0"
 )
 
+
 # Allow CORS for Frontend integration
 app.add_middleware(
     CORSMiddleware,
@@ -41,6 +42,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 async def auto_sync_backend_cameras_loop():
     """Background worker that continuously syncs cameras from Backend API (GET /api/cameras)."""
@@ -227,6 +229,7 @@ def pipeline_loop(stream: StreamState):
                     api_url=stream.api_url,
                     session_token=stream.session_token,
                 )
+
 
             # Calculate FPS
             t_end = time.time()
