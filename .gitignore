@@ -3,14 +3,25 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# C extensions
+# C extensions & Dynamic Libraries
 *.so
+*.so.*
+*.dylib
+*.dll
+libplay.so
 
 # Virtual environments
 venv/
 env/
 ENV/
 .venv/
+
+# Environment variables, Tokens & API Keys
+.env
+.env.*
+*.pem
+*.key
+*.crt
 
 # Large Model Weights
 *.pt
@@ -19,8 +30,11 @@ ENV/
 *.engine
 *.tflite
 *.weights
+*.safetensors
+*.bin
+app/weights/
 
-# Compressed Archives / SDK Zips
+# Compressed Archives & Large SDK Distributions
 *.zip
 *.tar
 *.tar.gz
@@ -28,10 +42,18 @@ ENV/
 *.gz
 *.rar
 *.7z
+*.whl
+*.jar
+*.pdf
+*.chm
+app/services/sdk/SDK_DAHUA/
+app/services/sdk/SDK_HiK/
 
 # Output Videos & Media
 output/
+app/output/
 ai_core/output/
+images/*.mp4
 *.mp4
 *.avi
 *.mkv
@@ -47,6 +69,7 @@ ai_core/output/
 # IDEs & OS Files
 .idea/
 .vscode/
+.antigravity/
 *.swp
 *.swo
 .DS_Store

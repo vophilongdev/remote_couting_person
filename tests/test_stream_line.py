@@ -15,8 +15,10 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, BASE_DIR)
 
 from ultralytics import YOLO
-from ai_core.api_client import get_backend_rules, parse_lines_from_rules
-from ai_core.line_counter import LineConfig, MultiLineCounter
+from app.clients.http_client import get_backend_rules
+from app.clients.rule_parser import parse_lines_from_rules
+from app.models.schemas import LineConfig
+from app.core.line_counter import MultiLineCounter
 
 
 def main():
@@ -81,9 +83,9 @@ def main():
     line_counter = MultiLineCounter(lines=line_configs)
 
     # 2. Load YOLO Model
-    weights_path = os.path.join(BASE_DIR, "ai_core/weights/yolo_best2.pt")
+    weights_path = os.path.join(BASE_DIR, "app/weights/yolo_best2.pt")
     if not os.path.exists(weights_path):
-        weights_path = os.path.join(BASE_DIR, "ai_core/weights/yolo_best3.pt")
+        weights_path = os.path.join(BASE_DIR, "app/weights/yolo_best3.pt")
 
     print(f"\n[YOLO] Loading model from: {weights_path}")
     model = YOLO(weights_path)
